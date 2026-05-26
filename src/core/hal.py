@@ -106,13 +106,14 @@ class AirSimBackend(HardwareBackend):
     def send_velocity(self, vx, vy, vz, yaw_rate=0.0):
 
         self.connect()
+        import airsim
 
         return self.client.moveByVelocityAsync(
             vx,
             vy,
             vz,
             duration=0.1,
-            yaw_mode=None
+            yaw_mode=airsim.YawMode(is_rate=True, yaw_or_rate=yaw_rate * 57.2958) # Convert rad/s to deg/s
         )
 
 

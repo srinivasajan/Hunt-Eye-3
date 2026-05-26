@@ -3,6 +3,9 @@ import time
 import sys
 import os
 
+# Ensure PyTorch uses local offline cache before loading any Torch libraries
+os.environ["TORCH_HOME"] = os.path.join(os.path.dirname(os.path.abspath(sys.argv[0])), "models", "torch_hub_cache")
+
 # Add src to the Python path to allow imports from the src directory
 sys.path.insert(0, os.path.abspath('src'))
 
@@ -36,6 +39,8 @@ from ui.config_editor import ConfigEditor
 from ui.waypoint_editor import WaypointEditor
 from ai.planner import AStarPlanner
 from control.mavlink_interface import PIDController
+from control.worker import ControlWorker
+from perception.worker import PerceptionWorker
 
 
 def main():
@@ -75,6 +80,16 @@ def main():
     camera_worker = build_camera_worker()
 
     orchestrator.add_worker(camera_worker, factory=build_camera_worker)
+
+    # Perception and Tracking Worker
+    def build_perception_worker():
+        return PerceptionWorker(state=state, config=config)
+    orchestrator.add_worker(build_perception_worker(), factory=build_perception_worker)
+
+    # Control Worker to send actual commands to HAL
+    def build_control_worker():
+        return ControlWorker(state=state, hal=telemetry_hal, config=config, pid=pid, planner=planner, safety=safety)
+    orchestrator.add_worker(build_control_worker(), factory=build_control_worker)
 
     if config.get("plugins", {}).get("enabled"):
 
@@ -203,31 +218,6 @@ def main():
                 fps_counter.update()
 
                 fps = fps_counter.get_fps()
-
-                try:
-
-                    telemetry = telemetry_hal.get_telemetry()
-
-                    with state.lock:
-
-                        state.telemetry = telemetry
-
-                    telemetry_history.append(state, telemetry)
-
-                    _update_dev3_autonomy(
-                        state=state,
-                        frame=frame,
-                        telemetry=telemetry,
-                        safety=safety,
-                        pid=pid,
-                        planner=planner,
-                    )
-
-                except Exception as error:
-
-                    Logger.warning(f"Telemetry/autonomy update failed | error={error}")
-
-                    event_log.append(state, "WARN", "Telemetry/autonomy update failed", {"error": str(error)})
 
                 snapshot = state.snapshot()
 
@@ -452,53 +442,6 @@ def _current_waypoint(state):
     }
 
 
-def _update_dev3_autonomy(state, frame, telemetry, safety, pid, planner):
-    with state.lock:
-        target_bbox = state.target_bbox
-        mode = state.system_mode
-        cost_map = state.cost_map
-
-    vx = vy = vz = 0.0
-    if target_bbox:
-        x, y, w, h = _normalize_bbox(target_bbox)
-        target_cx = x + (w / 2.0)
-        target_cy = y + (h / 2.0)
-        frame_h, frame_w = frame.shape[:2]
-        vx, vy = pid.calculate(
-            target_cx,
-            target_cy,
-            frame_cx=frame_w / 2.0,
-            frame_cy=frame_h / 2.0,
-        )
-
-    position = telemetry.get("position", {})
-    altitude = float(position.get("z", telemetry.get("altitude", 0.0)) or 0.0)
-    distance = float(telemetry.get("distance_from_home", 0.0) or 0.0)
-    vx, vy, vz, safe, reason = safety.enforce_command(
-        vx, vy, vz, altitude, distance, mode
-    )
-
-    path = []
-    if cost_map is not None:
-        try:
-            planner.cost_map = cost_map
-            h, w = planner.cost_map.shape[:2]
-            path = planner.find_path((0, 0), (h - 1, w - 1)) or []
-        except Exception:
-            path = []
-    elif target_bbox:
-        path = planner.find_path((0, 0), (19, 19)) or []
-
-    with state.lock:
-        state.control_command = {"vx": vx, "vy": vy, "vz": vz}
-        state.safety = {"safe": safe, "reason": reason}
-        if path:
-            state.planned_path = [
-                {"x": float(x), "y": float(y), "z": 0.0}
-                for x, y in path
-            ]
-
-
 def _normalize_bbox(bbox):
     x1, y1, a, b = [float(v) for v in bbox[:4]]
     if a > x1 and b > y1:
@@ -507,5 +450,11 @@ def _normalize_bbox(bbox):
 
 
 if __name__ == "__main__":
-
-    main()
+    import traceback
+    try:
+        main()
+    except Exception as e:
+        Logger.error(f"FATAL CRASH in main: {e}")
+        with open("crash_log.txt", "w") as f:
+            f.write(traceback.format_exc())
+            print(f"CRASH: {e}\nCheck crash_log.txt")

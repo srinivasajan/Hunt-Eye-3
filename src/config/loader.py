@@ -102,13 +102,27 @@ DEFAULT_CONFIG: dict[str, Any] = {
 }
 
 
+import sys
+
 def load_config(path: str | Path = "config.yaml") -> dict[str, Any]:
     config = deepcopy(DEFAULT_CONFIG)
-    config_path = Path(path)
+    
+    # Handle PyInstaller _MEIPASS pathing
+    if getattr(sys, 'frozen', False) and hasattr(sys, '_MEIPASS'):
+        base_path = Path(sys._MEIPASS)
+        config_path = base_path / path
+    else:
+        config_path = Path(path)
 
     if config_path.exists():
         loaded = _parse_simple_yaml(config_path.read_text(encoding="utf-8"))
         _deep_update(config, loaded)
+    else:
+        # Fallback to local if meipass missing file temporarily
+        fallback = Path(path)
+        if fallback.exists():
+            loaded = _parse_simple_yaml(fallback.read_text(encoding="utf-8"))
+            _deep_update(config, loaded)
 
     _validate_config(config)
     return config

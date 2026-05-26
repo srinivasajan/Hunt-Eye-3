@@ -10,3 +10,9 @@ gymnasium
 stable-baselines3
 PyQt6
 psutil
+
+# Perception and packaging
+ultralytics
+torch
+torchvision
+pyinstaller
